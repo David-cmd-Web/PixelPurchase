@@ -1608,36 +1608,43 @@ const B=(act,id,txt,c='',more='')=>`<button class="btn ${c}" data-act="${act}" d
 function allComments(){const out=[];for(const id in S.comments)(S.comments[id]||[]).forEach(c=>out.push({...c,itemId:id}));return out}
 function renderOwner(){
   if($('view-owner').hidden)return;
+  if(!ownerData&&!ownerLoading&&!ownerErr)loadOwner();
+  const od=ownerData;
   const items=Object.values(S.items);
   const pend=items.filter(t=>t.status==='pending').sort((a,b)=>a.boughtAt-b.boughtAt);
   S.reports=S.reports.filter(r=>S.items[r.itemId]);
   const ac=allComments(),repIds=new Set(S.creports.map(r=>r.cid));S.creports=S.creports.filter(r=>ac.some(c=>c.id===r.cid));
   S.orders=S.orders||{};const allOrders=Object.values(S.orders),waiting=allOrders.filter(o=>o.status==='waiting').sort((a,b)=>a.time-b.time);
-  const nReview=waiting.length+S.reports.length,unread=allOrders.filter(o=>!o.read).length,liveAll=items.filter(t=>t.status==='live');
+  const nReview=(od?od.pending.length:0)+S.reports.length,unread=allOrders.filter(o=>!o.read).length,liveAll=items.filter(t=>t.status==='live');
   $('c-review').textContent=nReview;$('c-review').classList.toggle('hot',nReview>0);
   $('c-live').textContent=fmt(liveAll.length);
   $('c-comments').textContent=S.creports.length||ac.length;$('c-comments').classList.toggle('hot',S.creports.length>0);
   $('c-people').textContent=fmt(Object.keys(S.users).length);
-  $('c-inbox').textContent=unread||allOrders.length;$('c-inbox').classList.toggle('hot',unread>0);
+  $('c-inbox').textContent=od?od.pending.length+od.recent.length:0;$('c-inbox').classList.remove('hot');
   document.querySelectorAll('[data-otab]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.otab===otab));
   ['review','wall','comments','people','inbox','settings'].forEach(k=>$('ot-'+k).hidden=k!==otab);
   const head=it=>`${titleOf(it)} · ${money(priceOf(it.n))}`;
   if(otab==='review'){
     const rep=S.reports.map(r=>{const it=S.items[r.itemId];return orow(it,B('takedown',it.id,'Take down','danger')+B('dismiss',it.id,'Keep it','',`data-rep="${r.id}"`)+B('view',it.id,'See on wall'),
       `<div class="t">Reported · ${titleOf(it)}</div><div class="meta">${agoS(r.time)} · ${esc(r.reason)}${it.caption?` · "${esc(it.caption)}"`:''}</div><div class="who">${who(it.buyer)}</div>`,'flag')});
-    const pen=waiting.map(o=>{const its=o.itemIds.map(id=>S.items[id]).filter(i=>i&&i.status==='pending'),sum=its.reduce((a,i)=>a+priceOf(i.n),0);
-      return `<div class="item" style="grid-template-columns:minmax(0,1fr)"><div style="min-width:0"><div class="t">New order · ${its.length} spot${its.length===1?'':'s'} · ${money(sum)}</div>
-        <div class="meta">${agoS(o.time)} · not charged yet</div><div class="who">${who(o.buyer)}</div>
-        <div class="olist">${its.map(i=>`<div class="oitem"><div class="thumb" style="background-image:url('${thumb(i)}')"></div><div style="min-width:0"><b style="font-size:14px">${titleOf(i)} · ${money(priceOf(i.n))}</b><div class="meta">${i.caption?`"${esc(i.caption)}"`:'No caption'}</div></div>${its.length>1?`<button class="btn danger" data-oact="drop" data-id="${i.id}">Remove</button>`:''}</div>`).join('')}</div>
-        <div class="acts"><button class="btn ok" data-oact="approve" data-oid="${o.id}">Approve and charge ${money(sum)}</button><button class="btn danger" data-oact="decline" data-oid="${o.id}">Decline</button><button class="btn danger" data-oact="declineblock" data-oid="${o.id}">Decline and block</button></div></div></div>`});
-    $('review').innerHTML=rep.concat(pen).join('')||'<p class="empty">All caught up. Nothing to review.</p>';
+    const pen=od?od.pending.map(o=>{const p=od.people[o.buyer_id]||{},rm=ownerRemove[o.id]||new Set(),keep=o.spots.filter(x=>!rm.has(x.id)),sum=keep.reduce((a,x)=>a+priceOf(x.size),0);
+      const left=o.paid_at?7-(Date.now()-Date.parse(o.paid_at))/864e5:7,urgent=left<2;
+      return `<div class="item" style="grid-template-columns:minmax(0,1fr)${urgent?';border-left:4px solid var(--bad)':''}"><div style="min-width:0">
+        <div class="t">Order #${o.id} · ${o.spots.length} spot${o.spots.length===1?'':'s'} · ${money(o.amount_cents/100)}</div>
+        <div class="meta">${o.paid_at?agoS(Date.parse(o.paid_at))+' · ':''}card checked, not charged · <b style="${urgent?'color:var(--bad)':''}">card hold ends in ${left<1?'less than a day':Math.floor(left)+' day'+(Math.floor(left)===1?'':'s')}</b></div>
+        <div class="who">${esc(p.name||'Someone')} · @${esc(p.handle||'')}${p.email?'<br>'+esc(p.email):''}</div>
+        <div class="olist">${o.spots.map(x=>{const off=rm.has(x.id),bg=x.kind==='color'?`background:${x.color}`:`background-image:url('${PIC_URL(x.image_path)}')`;
+          return `<div class="oitem" style="${off?'opacity:.4':''}"><div class="thumb" style="${bg}"></div><div style="min-width:0"><b style="font-size:14px">${x.size===1?'Pixel':x.size+'×'+x.size+' block'} · ${money(priceOf(x.size))}${x.founding?' · Founding':''}</b><div class="meta">${where(x.y*COLS+x.x)} · ${x.caption?`"${esc(x.caption)}"`:'No caption'}</div></div>${o.spots.length>1?`<button class="btn ${off?'':'danger'}" data-sact="toggle" data-oid="${o.id}" data-sid="${x.id}">${off?'Keep':'Remove'}</button>`:''}</div>`}).join('')}</div>
+        <div class="acts">${keep.length?`<button class="btn ok" data-sact="approve" data-oid="${o.id}">Approve and charge ${money(sum)}</button>`:''}<button class="btn danger" data-sact="decline" data-oid="${o.id}">Decline${keep.length?'':' the whole order'}</button></div></div></div>`}):[];
+    const status=ownerErr?`<div class="notice" style="border-color:var(--bad)">${esc(ownerErr)} <button class="linkbtn" data-sact="retry">Try again</button></div>`:(!od?'<p class="empty">Loading orders…</p>':'');
+    $('review').innerHTML=status+(rep.concat(pen).join('')||(od?'<p class="empty">All caught up. Nothing to review.</p>':''));
   }
   if(otab==='wall'){
     const q=$('q').value.trim().toLowerCase(),sort=$('sort').value;let live=liveAll;
     if(q)live=live.filter(t=>String(pixNum(t.idx)).includes(q.replace(/[#,]/g,''))||(t.caption||'').toLowerCase().includes(q)||t.buyer.name.toLowerCase().includes(q)||t.buyer.email.includes(q));
     const key={views:t=>t.views||0,likes:t=>t.likes||0,size:t=>t.n*1e9+(t.views||0),new:t=>t.postedAt||0}[sort];live.sort((a,b)=>key(b)-key(a));
-    $('live').innerHTML=(live.length?live.slice(0,40).map(it=>orow(it,B('takedown',it.id,'Take down','danger')+B('block',it.id,'Block buyer','danger')+B('view',it.id,'See on wall'),
-      `<div class="t">${head(it)}</div><div class="meta">Posted ${when(it.postedAt||it.boughtAt)} · ${fmt(it.views||0)} views · ${fmt(it.likes||0)} likes${awardsOf(it.id).length?` · Pixel of the Day ×${awardsOf(it.id).length}`:''}${it.caption?` · "${esc(it.caption)}"`:''}</div><div class="who">${who(it.buyer)}</div>`)).join(''):'<p class="empty">Nothing matches.</p>')
+    $('live').innerHTML=(live.length?live.slice(0,40).map(it=>orow(it,(it.remote?`<button class="btn danger" data-sact="takedown" data-spot="${it.id.slice(2)}">Take down</button>`:B('takedown',it.id,'Take down','danger')+B('block',it.id,'Block buyer','danger'))+B('view',it.id,'See on wall'),
+      `<div class="t">${head(it)}</div><div class="meta">Posted ${when(it.postedAt||it.boughtAt)} · ${fmt(it.views||0)} views · ${fmt(it.likes||0)} likes${awardsOf(it.id).length?` · Pixel of the Day ×${awardsOf(it.id).length}`:''}${it.caption?` · "${esc(it.caption)}"`:''}</div><div class="who">${it.remote?esc(((S.users[it.owner]||{}).name)||''):who(it.buyer)}</div>`)).join(''):'<p class="empty">Nothing matches.</p>')
       +(live.length>40?`<p class="empty">Showing 40 of ${fmt(live.length)}. Search to find others.</p>`:'');
   }
   if(otab==='comments'){
@@ -1653,17 +1660,15 @@ function renderOwner(){
       <div class="acts"><button class="btn ${u.verified?'':'ok'}" data-pact="verify" data-uid="${u.uid}">${u.verified?'Remove verified':'Verify'}</button><button class="btn ${bl?'':'danger'}" data-pact="block" data-uid="${u.uid}">${bl?'Unblock':'Block'}</button><a class="btn" href="#user-${u.handle}">Profile</a></div></div></div>`}).join('')||'<p class="empty">No one matches.</p>';
   }
   if(otab==='inbox'){
-    const os=allOrders.slice().sort((a,b)=>b.time-a.time);
-    $('inbox').innerHTML=os.length?os.slice(0,60).map(o=>{const first=o.itemIds.map(id=>S.items[id]).find(Boolean);
-      const chip={waiting:'<span class="chip wait"><i></i>Waiting · not charged</span>',charged:`<span class="chip good"><i></i>Charged ${money(o.charged)}</span>`,partial:`<span class="chip good"><i></i>Charged ${money(o.charged)} of ${money(o.total)}</span>`,declined:'<span class="chip"><i></i>Declined · never charged</span>'}[o.status]||'';
-      return orow(first,`<button class="btn" data-oact="copy" data-oid="${o.id}">Copy info</button>`+(first&&first.status==='live'?B('view',first.id,'See on wall'):''),
-        `<div class="t">${o.itemIds.length} spot${o.itemIds.length===1?'':'s'} · ${money(o.total)}</div><div class="meta">${when(o.time)}</div><div class="who">${who(o.buyer)}</div><div class="chips" style="margin-top:6px">${chip}</div>`,o.read?'':'unread')}).join(''):'<p class="empty">No orders yet.</p>';
-    setTimeout(()=>{if(otab==='inbox'&&allOrders.some(o=>!o.read)){allOrders.forEach(o=>o.read=true);save();$('c-inbox').textContent=allOrders.length;$('c-inbox').classList.remove('hot')}},1200);
+    const all=od?od.pending.map(o=>({...o,status:'pending'})).concat(od.recent):[];
+    const chip={pending:'<span class="chip wait"><i></i>Waiting · not charged</span>',approved:'<span class="chip good"><i></i>Charged</span>',declined:'<span class="chip"><i></i>Declined · never charged</span>',expired:'<span class="chip"><i></i>Expired · never charged</span>'};
+    $('inbox').innerHTML=(ownerErr?`<div class="notice">${esc(ownerErr)}</div>`:'')+(all.length?all.map(o=>{const p=(od.people||{})[o.buyer_id]||{};
+      return `<div class="item" style="grid-template-columns:minmax(0,1fr)"><div style="min-width:0"><div class="t">Order #${o.id} · ${money(o.amount_cents/100)}</div><div class="meta">${when(Date.parse(o.decided_at||o.paid_at||o.created_at))}</div><div class="who">${esc(p.name||'')} @${esc(p.handle||'')}${p.email?' · '+esc(p.email):''}</div><div class="chips" style="margin-top:6px">${chip[o.status]||''}</div></div></div>`}).join(''):(od?'<p class="empty">No orders yet.</p>':'<p class="empty">Loading orders…</p>'));
   }
   if(otab==='settings'){
-    $('s-approve').checked=S.settings.requireApproval;
+    $('s-approve').checked=true;$('s-approve').disabled=true;
     $('blocked').innerHTML=S.blocked.length?S.blocked.map(e=>`<div class="blocked"><span>${esc(e)}</span><button class="btn" data-act="unblock" data-email="${esc(e)}">Unblock</button></div>`).join(''):'<p class="empty">Nobody is blocked.</p>';
-    $('math').innerHTML=`Only you see this.<br>Pixels sold: ${fmt(S.sold)} of ${fmt(TOTAL)} · ${money(S.revenue||0)} charged<br>Full wall at $1.49 a pixel: ${money(Math.round(TOTAL*1.49))}<br>You keep about $1.13 a pixel on singles and $1.07 to $1.14 on blocks after card fees<br>Approve within 7 days, or the card hold expires and the buyer has to re-order.`;
+    $('math').innerHTML=`Only you see this.<br>${od?`Pixels live: ${fmt(od.totals.pixels_live)} of ${fmt(TOTAL)} · ${money(od.totals.charged_cents/100)} charged`:'Loading totals…'}<br>Full wall at $1.49 a pixel: ${money(Math.round(TOTAL*1.49))}<br>You keep about $1.13 a pixel on singles and $1.07 to $1.14 on blocks after card fees<br>Approve within 7 days, or the card hold expires and the buyer has to re-order.`;
   }
 }
 document.querySelectorAll('[data-otab]').forEach(b=>b.onclick=()=>{otab=b.dataset.otab;renderOwner()});
@@ -1857,6 +1862,36 @@ async function loadWall(force){
 setInterval(()=>{if(!document.hidden&&['wall','feed','game'].includes(route.view))loadWall()},60e3);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)loadWall()});
 
+/* ---------- owner panel on real orders ----------
+   Every action goes to /api/owner, which re-checks your owner account AND your passcode unlock. */
+let ownerData=null,ownerLoading=false,ownerErr=null,ownerRemove={},ownerArmed=null;
+async function ownerCall(action,extra={}){
+  if(!/^https?:/.test(location.protocol))throw new Error('The owner panel only works on the live website.');
+  if(!ownerOK())throw new Error('locked');
+  let t=null;try{const {data}=await SB.auth.getSession();t=data&&data.session&&data.session.access_token}catch(e){}
+  const r=await fetch('/api/owner',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+(t||'')},body:JSON.stringify({action,token:ownerTok.token,...extra})});
+  const d=await r.json().catch(()=>({}));
+  if(d.code==='locked'){clearOwner();ownerData=null;goTo('#wall');infoPop({icon:'🔒',title:'Owner panel locked',body:'Your unlock ran out or you were signed out. Hold the logo for 4 seconds to unlock it again.',claim:false,ok:'Got it'});throw new Error('locked')}
+  if(!r.ok)throw new Error(d.error||'Something went wrong. Try again.');
+  return d}
+async function loadOwner(){if(ownerLoading)return;ownerLoading=true;ownerErr=null;
+  try{ownerData=await ownerCall('list')}catch(e){if(e.message!=='locked')ownerErr=e.message}
+  finally{ownerLoading=false;renderOwner()}}
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-sact]');if(!b)return;e.preventDefault();
+  const a=b.dataset.sact,oid=Number(b.dataset.oid);
+  if(a==='retry'){ownerErr=null;loadOwner();return}
+  if(a==='toggle'){const set=ownerRemove[oid]||(ownerRemove[oid]=new Set()),sid=Number(b.dataset.sid);set.has(sid)?set.delete(sid):set.add(sid);renderOwner();return}
+  const key=a+(b.dataset.oid||b.dataset.spot);
+  if(ownerArmed!==key){ownerArmed=key;b.textContent=a==='approve'?'Tap again to charge the card':a==='decline'?'Tap again to decline':'Tap again to take it down';
+    setTimeout(()=>{if(ownerArmed===key){ownerArmed=null;renderOwner()}},4000);return}
+  ownerArmed=null;b.disabled=true;b.textContent=a==='approve'?'Charging…':a==='decline'?'Declining…':'Taking down…';
+  try{
+    if(a==='approve'){const d=await ownerCall('approve',{order:oid,remove:[...(ownerRemove[oid]||[])]});delete ownerRemove[oid];toast(`Approved. Charged ${money(d.charged_cents/100)}. It’s live on the wall.`)}
+    if(a==='decline'){await ownerCall('decline',{order:oid});delete ownerRemove[oid];toast('Declined. The card was never charged.')}
+    if(a==='takedown'){await ownerCall('takedown',{spot:Number(b.dataset.spot)});toast('Taken down. That spot is open again.')}
+    ownerData=null;await loadOwner();loadWall(true);
+  }catch(err){if(err.message!=='locked'){toast(err.message);renderOwner()}}});
+
 /* ---------- owner access ---------- */
 /* Three locks: (1) signed in as the owner account (is_admin can only be set in Supabase),
    (2) hold the logo for 4 seconds, (3) a passcode the SERVER checks (stored scrambled; 5 wrong tries = 15-minute lockout).
@@ -1922,7 +1957,7 @@ function route(){
   if(v==='game'&&prev!=='game'){sel=null;game={phase:'intro'};setArea(false)}
   if(v==='feed')buildFeed();
   if(v==='profile'){profHandle=prof[1];renderProfile();window.scrollTo(0,0)}
-  if(v==='owner')renderOwner();
+  if(v==='owner'){ownerData=null;ownerErr=null;renderOwner()}
   else if(v==='login')setTimeout(()=>$('pc').focus(),30);
   if(v==='wall'||v==='game'){requestAnimationFrame(()=>{resize();
     if(deep){const idx=Number(deep[1])-1;if(idx>=0&&idx<TOTAL){const it=itemAt(idx);if(it)selectItem(it.id);else selectEmpty(idx,1)}}
