@@ -660,7 +660,10 @@ function seed(){
 }
 function load(){const s=ls.get(KEY,null);if(s&&s.items&&s.users){s.settings.passcode=s.settings.passcode||'change-me';return s}return seed()}
 /* Example pixels (used while the wall fills up) are never saved. */
-function save(){const items={};for(const k in S.items)if(!S.items[k].demo)items[k]=S.items[k];ls.set(KEY,{...S,items})}
+function save(){let mine=null;try{mine=ME}catch(e){}
+  const items={},users={};for(const k in S.items){const i=S.items[k];if(!i.demo&&!i.remote)items[k]=i}
+  for(const k in S.users){const u=S.users[k];if(!u.remote||k===mine)users[k]=u}
+  ls.set(KEY,{...S,items,users})}
 S=load();
 /* ---------- Supabase (live accounts) ----------
    The publishable key is meant to be public. The database rules protect the data. */
@@ -668,7 +671,7 @@ const SUPABASE_URL='https://xobpucpkiaaovnnyjklo.supabase.co';
 const SUPABASE_KEY='sb_publishable_1lMxX4ufv-dLpjKOq5xdOg_zXZ7XUCH';
 const SB=(()=>{try{if(window.supabase)return window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY)}catch(e){}
   /* If the sign-in code can't load (offline, or inside a preview window), everything else on the page still works. */
-  const off=async()=>({data:null,error:{message:'offline'}}),q={select:()=>q,eq:()=>q,maybeSingle:off};
+  const off=async()=>({data:null,error:{message:'offline'}}),q={select:()=>q,eq:()=>q,in:()=>q,maybeSingle:off};
   return {auth:{onAuthStateChange(){},signUp:off,signInWithPassword:off,signOut:async()=>({}),resend:off,resetPasswordForEmail:off,updateUser:off},from:()=>q,rpc:off}})();
 const backTo=()=>/^https?:/.test(location.protocol)?location.origin+location.pathname:undefined;
 let ME=ls.get('pixelplot-me',null);
@@ -751,7 +754,7 @@ async function adoptSession(session){
     SB.from('account_private').select('age_group').eq('user_id',id).maybeSingle()]);
   if(!p)return null;
   const old=S.users[id]||{best:null,games:0,found:0};
-  S.users[id]={...old,uid:id,name:p.name,handle:p.handle,verified:p.verified,email:session.user.email,joined:Date.parse(p.created_at),ageGroup:pv?pv.age_group:old.ageGroup};
+  S.users[id]={...old,remote:false,uid:id,name:p.name,handle:p.handle,verified:p.verified,email:session.user.email,joined:Date.parse(p.created_at),ageGroup:pv?pv.age_group:old.ageGroup};
   save();if(ME!==id)setMe(id);else renderMe();refreshViews();return S.users[id]}
 SB.auth.onAuthStateChange((event,session)=>{
   if(event==='PASSWORD_RECOVERY'){setTimeout(openNewPassword,0);return}
@@ -801,12 +804,14 @@ function drawArt(g,a,size){
   }
   g.restore();
 }
-function avgOf(c){const t=document.createElement('canvas');t.width=t.height=1;const g=t.getContext('2d');g.drawImage(c,0,0,1,1);const d=g.getImageData(0,0,1,1).data;return `rgb(${d[0]},${d[1]},${d[2]})`}
+function avgOf(c){try{const t=document.createElement('canvas');t.width=t.height=1;const g=t.getContext('2d');g.drawImage(c,0,0,1,1);const d=g.getImageData(0,0,1,1).data;return `rgb(${d[0]},${d[1]},${d[2]})`}catch(e){return '#8E88AE'}}
 function art(it){
   const key=artKey(it)+'|'+it.n;let e=cache.get(it.id);if(e&&e.key===key)return e;
   const size=Math.min(it.n*ART,MAXC),c=document.createElement('canvas');c.width=c.height=size;const g=c.getContext('2d');g.imageSmoothingEnabled=false;
   e={key,canvas:c,avg:'#999',url:null,ready:false};cache.set(it.id,e);
-  if(it.img){const im=new Image();e.im=im;im.onload=()=>{g.imageSmoothingEnabled=true;g.drawImage(im,0,0,size,size);e.avg=avgOf(c);e.ready=true;requestDraw()};im.src=it.img;e.url=it.img}
+  if(it.img){const im=new Image();e.im=im;if(/^https?:/.test(it.img))im.crossOrigin='anonymous';
+    im.onerror=()=>{if(im.crossOrigin){im.crossOrigin=null;im.removeAttribute('crossorigin');im.src=it.img+(it.img.includes('?')?'&':'?')+'r=1'}};
+    im.onload=()=>{g.imageSmoothingEnabled=true;g.drawImage(im,0,0,size,size);e.avg=avgOf(c);e.ready=true;requestDraw()};im.src=it.img;e.url=it.img}
   else if(it.color){g.fillStyle=it.color;g.fillRect(0,0,size,size);e.avg=it.color;e.ready=true}
   else{drawArt(g,it.art,size);e.avg=avgOf(c);e.ready=true}
   return e;
@@ -1182,7 +1187,7 @@ function renderItem(it){
   if(!it){clearSel();return}
   const live=it.status==='live',isLiked=liked.has(it.id),aw=awardsOf(it.id),u=S.users[it.owner],nc=commentsOf(it.id).length,mine=me()&&me().uid===it.owner;
   side.innerHTML=`<div><h2>${titleOf(it)}</h2><p class="coords">${it.n>1?`${it.n*it.n} pixels from `:''}${where(it.idx)}</p></div>
-    <div class="who-row">${avatar(u)}<div style="flex:1;min-width:0">${nameLink(u)}<div class="handle">@${esc(u?u.handle:'')}</div></div>${folBtn(u,'btn')}</div>
+    ${u?`<div class="who-row">${avatar(u)}<div style="flex:1;min-width:0">${nameLink(u)}<div class="handle">@${esc(u.handle)}</div></div>${folBtn(u,'btn')}</div>`:''}
     <div class="bigtile" style="${live?`background-image:url('${thumb(it)}')`:'background:var(--pending)'}"></div>
     ${live?(it.caption?`<p class="cap">${esc(it.caption)}</p>`:'')
       :`<p class="muted">${mine?'Your order is waiting for approval. You have not been charged yet.':'This spot is being reviewed. It shows up once approved.'}</p>`}
@@ -1561,7 +1566,7 @@ async function certImage(u,c){
     :c.type==='potd'?'won Pixel of the Day with the most-liked pixel on the wall'
     :`was the fastest finder of the day in Find the Pixel`;
   g.fillStyle=navy;g.font='400 30px "Atkinson Hyperlegible", sans-serif';g.fillText(line,W2/2,532);
-  if(c.item){const im=await new Promise(r=>{const i=new Image();i.onload=()=>r(i);i.onerror=()=>r(null);i.src=thumb(c.item)});
+  if(c.item){const im=await new Promise(r=>{const i=new Image(),src=thumb(c.item);if(/^https?:/.test(src))i.crossOrigin='anonymous';i.onload=()=>r(i);i.onerror=()=>r(null);i.src=src});
     const bx=W2/2-110,by=568,bs=220;g.fillStyle='#FFFFFF';g.fillRect(bx-10,by-10,bs+20,bs+20);g.strokeStyle=c.type==='potd'?gold:'#D6DBEF';g.lineWidth=c.type==='potd'?8:3;g.strokeRect(bx-10,by-10,bs+20,bs+20);
     if(im){g.imageSmoothingEnabled=c.item.kind==='image';g.drawImage(im,bx,by,bs,bs)}else if(c.item.color){g.fillStyle=c.item.color;g.fillRect(bx,by,bs,bs)}}
   else{g.fillStyle=blue;g.font='400 120px Bungee, "Arial Black", sans-serif';g.fillText(c.time.toFixed(1)+'s',W2/2,740)}
@@ -1702,7 +1707,7 @@ if($('s-wipe'))$('s-wipe').onclick=()=>{const b=$('s-wipe');
    and "design free, pay when you love it". No fake timers or made-up activity. */
 function foundCount(){let n=0;for(const k in S.items)if(S.items[k].founding&&!S.items[k].demo)n++;return n}
 /* On the live site this number comes from the server. */
-function foundLeft(){return Math.max(0,1000-foundCount())}
+function foundLeft(){return serverFoundLeft!=null?serverFoundLeft:Math.max(0,1000-foundCount())}
 function renderHero(){const left=foundLeft();
   $('found-left').textContent=fmt(left);$('found-bar').style.width=(left/10)+'%';
   if(left===0){$('found-num').textContent='All 1,000 are claimed';$('found-fine').textContent='Every Founding Pixel has an owner. Plenty of regular spots are still open.'}
@@ -1772,7 +1777,7 @@ async function shareImage(it){
   g.fillStyle='#FFFFFF';g.fillRect(bx-14,by-14,bs+28,bs+28);
   if(it.founding){g.strokeStyle='#F2A91C';g.lineWidth=10;g.strokeRect(bx-19,by-19,bs+38,bs+38)}
   if(it.color){g.fillStyle=it.color;g.fillRect(bx,by,bs,bs)}
-  else{const im=await new Promise(r=>{const i=new Image();i.onload=()=>r(i);i.onerror=()=>r(null);i.src=thumb(it)});
+  else{const im=await new Promise(r=>{const i=new Image(),src=thumb(it);if(/^https?:/.test(src))i.crossOrigin='anonymous';i.onload=()=>r(i);i.onerror=()=>r(null);i.src=src});
     if(im){g.imageSmoothingEnabled=it.kind==='image';g.drawImage(im,bx,by,bs,bs)}}
   let y=by+bs+90;
   if(it.founding){const label='FOUNDING PIXEL · ONE OF THE FIRST 1,000';g.font='700 30px "Atkinson Hyperlegible", sans-serif';const tw=g.measureText(label).width+48;
@@ -1807,6 +1812,35 @@ async function openShare(ids,live){const it=S.items[ids[0]];if(!it)return;
     }catch(e){if(e&&e.name==='AbortError')return}
     navigator.clipboard.writeText(text+(url?' '+url:'')).then(()=>toast('Copied. Paste it anywhere.')).catch(()=>toast(text))};
   $('sh-share').focus()}
+
+/* ---------- the live wall ----------
+   Real pixels come from the database, so every visitor sees the same wall.
+   They're never stored in the browser; they reload fresh on every visit and every minute. */
+const PIC_URL=path=>`${SUPABASE_URL}/storage/v1/object/public/pixels/${String(path).split('/').map(encodeURIComponent).join('/')}`;
+let serverFoundLeft=null,wallLoading=false,wallLoadedAt=0;
+async function loadWall(force){
+  if(wallLoading||(!force&&Date.now()-wallLoadedAt<20e3))return;wallLoading=true;
+  try{
+    const [{data:rows,error},fl]=await Promise.all([SB.rpc('pp_wall_area',{x0:0,y0:0,x1:COLS,y1:ROWS}),SB.rpc('pp_founding_left')]);
+    if(error||!Array.isArray(rows))return;
+    if(fl&&typeof fl.data==='number')serverFoundLeft=fl.data;
+    const keep={};for(const k in S.items)if(S.items[k].remote){keep[k]=S.items[k];delete S.items[k]}
+    const owners=new Set();
+    rows.forEach(r=>{const id='db'+r.id,live=r.state==='live',old=keep[id]||{};
+      const it={id,remote:true,idx:r.y*COLS+r.x,n:r.size,status:live?'live':'pending',caption:r.caption||'',owner:r.owner_id||null,founding:!!r.founding,
+        postedAt:r.live_at?Date.parse(r.live_at):null,boughtAt:r.live_at?Date.parse(r.live_at):Date.now(),views:old.views||0,likes:old.likes||0,buyer:{name:'',email:''}};
+      if(live){if(r.kind==='color'&&r.color)it.color=r.color;else if(r.image_path){it.img=PIC_URL(r.image_path);it.kind=r.kind}else it.color='#8E88AE'}
+      S.items[id]=it;if(r.owner_id)owners.add(r.owner_id)});
+    const need=[...owners].filter(u=>!S.users[u]).slice(0,500);
+    if(need.length){const {data:ps}=await SB.from('profiles').select('id,handle,name,verified').in('id',need);
+      (ps||[]).forEach(p=>{S.users[p.id]={...(S.users[p.id]||{}),uid:p.id,name:p.name,handle:p.handle,verified:p.verified,remote:p.id!==ME}})}
+    wallLoadedAt=Date.now();rebuild();requestDraw();
+    if(route.view==='wall'&&!sel)renderSide();
+    if(route.view==='profile')renderProfile();
+    if(route.view==='feed'&&feedList.length&&feedList.every(i=>i.demo)&&Object.values(S.items).some(i=>i.remote&&i.status==='live'))buildFeed();
+  }catch(e){}finally{wallLoading=false}}
+setInterval(()=>{if(!document.hidden&&['wall','feed','game'].includes(route.view))loadWall()},60e3);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)loadWall()});
 
 /* ---------- owner access ---------- */
 /* Three locks: (1) signed in as the owner account (is_admin can only be set in Supabase),
@@ -1879,6 +1913,7 @@ function route(){
     if(deep){const idx=Number(deep[1])-1;if(idx>=0&&idx<TOTAL){const it=itemAt(idx);if(it)selectItem(it.id);else selectEmpty(idx,1)}}
     renderSide();requestDraw()})}
   updateSticky();
+  if(['wall','feed','game','profile'].includes(v))loadWall();
 }
 route.view=null;
 function refreshViews(){renderMe();if(route.view==='wall'||route.view==='game')renderSide();if(route.view==='profile')renderProfile()}
@@ -1888,7 +1923,7 @@ let tt;function toast(m){const el=$('toast');el.textContent=m;el.classList.add('
 function renderAll(){renderRules();renderSide();renderOwner();requestDraw()}
 setInterval(()=>{if(rollDay()){renderSide();requestDraw()}},60e3);
 $('cart-btn').onclick=()=>openCheckout();
-renderRules();renderMe();renderCartBtn();route();
+renderRules();renderMe();renderCartBtn();route();loadWall(true);
 })();
 </script>
 </body>
