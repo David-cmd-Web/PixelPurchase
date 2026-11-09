@@ -672,7 +672,7 @@ const SUPABASE_KEY='sb_publishable_1lMxX4ufv-dLpjKOq5xdOg_zXZ7XUCH';
 const SB=(()=>{try{if(window.supabase)return window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY)}catch(e){}
   /* If the sign-in code can't load (offline, or inside a preview window), everything else on the page still works. */
   const off=async()=>({data:null,error:{message:'offline'}}),q={select:()=>q,eq:()=>q,in:()=>q,maybeSingle:off};
-  return {auth:{onAuthStateChange(){},signUp:off,signInWithPassword:off,signOut:async()=>({}),resend:off,resetPasswordForEmail:off,updateUser:off},from:()=>q,rpc:off}})();
+  return {auth:{onAuthStateChange(){},getSession:async()=>({data:{session:null}}),signUp:off,signInWithPassword:off,signOut:async()=>({}),resend:off,resetPasswordForEmail:off,updateUser:off},from:()=>q,rpc:off}})();
 const backTo=()=>/^https?:/.test(location.protocol)?location.origin+location.pathname:undefined;
 let ME=ls.get('pixelplot-me',null);
 const me=()=>ME&&S.users[ME]?S.users[ME]:null;
@@ -1286,10 +1286,10 @@ function draftItem(){const err=m=>{$('m-form').textContent=m;return null};
   return c}
 function addToCart(open){const c=draftItem();if(!c)return;cart.push(c);saveCart();sel=null;draft=null;pad=null;draftOK=false;renderSide();requestDraw();
   if(open)openCheckout();else toast('Added to your cart. Tap another empty square, or check out when you’re ready.')}
-function openCheckout(useNew){
+function openCheckout(){
   if(!cart.length){if(!checkout.hidden)closeModal(checkout);return}
-  const u=me(),w=wallet||{},saved=wallet&&wallet.last4&&!useNew,hold=S.settings.requireApproval,total=cartTotal(),px=cart.reduce((a,c)=>a+c.n*c.n,0);
-  const prev={email:$('co-email')?$('co-email').value:null,phone:$('co-phone')?$('co-phone').value:null,agree:$('co-agree')?$('co-agree').checked:false};
+  const u=me(),total=cartTotal(),px=cart.reduce((a,c)=>a+c.n*c.n,0);
+  const prevAgree=$('co-agree')?$('co-agree').checked:false;
   $('co-box').innerHTML=`<h2 id="co-h">Checkout</h2>
     <div class="list">${cart.map((c,i)=>`<div class="sum"><div class="tp" style="${c.color?`background:${c.color}`:`background-image:url('${c.img}')`}"></div>
       <div style="min-width:0"><b>${c.n===1?'1 pixel':`${c.n}×${c.n} block · ${c.n*c.n} pixels`}</b><div class="muted" style="font-size:13px">${where(c.idx)}${c.caption?` · "${esc(c.caption)}"`:''}</div>
@@ -1297,40 +1297,55 @@ function openCheckout(useNew){
       <div class="price">${money(priceOf(c.n))}</div></div>`).join('')}</div>
     <div class="cototal"><span>${fmt(px)} pixel${px===1?'':'s'} · one payment</span><b>${money(total)}</b></div>
     ${foundLeft()>0?`<div class="notice gold">Founding Pixels are still open. ${cart.length>foundLeft()?`Your first ${fmt(foundLeft())} spots`:`Every spot in this order`} gets a gold Founding badge, for good.</div>`:''}
-    <div class="group"><p class="step">Your info <em>(email and phone stay private)</em></p>
-      ${u?`<div class="who-row">${avatar(u)}<div>${nameLink(u)}<div class="handle">Posting as @${esc(u.handle)}</div></div></div>`
-        :`<p class="muted" style="font-size:14px">You need a profile to place an order. It takes a minute and confirms you meet the age rule.</p><div><button class="btn primary" id="co-signup">Create your profile</button></div>`}
-      <div class="field"><label for="co-email">Email</label><input type="email" id="co-email" autocomplete="email" value="${esc(prev.email??w.email??(u&&u.email)??'')}"></div>
-      <div class="field"><label for="co-phone">Phone <span class="muted" style="font-weight:400">(optional)</span></label><input type="tel" id="co-phone" autocomplete="tel" value="${esc(prev.phone??w.phone??'')}"></div>
-    </div>
-    ${hold?`<div class="notice">You won’t be charged now. Your card is checked today and charged only for the spots that are approved.</div>`:''}
-    ${saved?`<div class="card"><span>Visa ending ${wallet.last4} <span class="muted">· saved</span></span><button class="linkbtn" id="co-new">Use another card</button></div>`
-      :`<div class="stripebox">Card details are entered securely with Stripe and never touch Pixel Purchase.</div>
-        <label class="check"><input type="checkbox" id="co-save" checked> Save my card for faster checkout next time</label>`}
-    <label class="check"><input type="checkbox" id="co-agree" ${prev.agree?'checked':''}> <span>I agree to the <button type="button" class="linkbtn" id="co-rules">Community Rules</button></span></label>
+    ${u?`<div class="who-row">${avatar(u)}<div>${nameLink(u)}<div class="handle">Posting as @${esc(u.handle)}${u.email?` · receipt to ${esc(u.email)}`:''}</div></div></div>`
+      :`<p class="muted" style="font-size:14px">You need a profile to place an order. It takes a minute and confirms you meet the age rule.</p><div><button class="btn primary" id="co-signup">Create your profile</button></div>`}
+    <div class="notice">You won’t be charged now. Your card is checked today and charged only once your order is approved. If it isn’t approved, you’re never charged.</div>
+    <div class="stripebox">Next, you’ll enter your card on Stripe’s secure page. Card details never touch Pixel Purchase.</div>
+    <label class="check"><input type="checkbox" id="co-agree" ${prevAgree?'checked':''}> <span>I agree to the <button type="button" class="linkbtn" id="co-rules">Community Rules</button></span></label>
     ${u&&u.ageGroup==='teen'?'<label class="check"><input type="checkbox" id="co-parent"> <span>My parent or guardian said OK to this order.</span></label>':''}
     <p class="formerr" id="co-err"></p>
-    <div class="acts"><button class="btn" id="co-cancel">Keep shopping</button><button class="pay" id="co-pay">${hold?'Place order':'Pay'} · ${money(total)}</button></div>
-    ${saved?'<button class="linkbtn" id="co-forget" style="align-self:flex-start;font-size:13px">Forget my saved card</button>':''}`;
+    <div class="acts"><button class="btn" id="co-cancel">Keep shopping</button><button class="pay" id="co-pay">Continue to payment · ${money(total)}</button></div>`;
   $('co-cancel').onclick=()=>closeModal(checkout);
   $('co-rules').onclick=()=>{$('rules-agree').hidden=false;rules.hidden=false;$('rules-agree').focus()};
-  const su=$('co-signup');if(su)su.onclick=()=>openSignup(()=>openCheckout(useNew));
-  if(saved){$('co-new').onclick=()=>openCheckout(true);$('co-forget').onclick=()=>{wallet=null;ls.set(wkey(),null);toast('Saved card removed.');openCheckout()}}
-  $('co-box').querySelectorAll('[data-crm]').forEach(b=>b.onclick=()=>{cart.splice(Number(b.dataset.crm),1);saveCart();requestDraw();if(route.view==='wall'&&!sel)renderSide();openCheckout(useNew)});
+  const su=$('co-signup');if(su)su.onclick=()=>openSignup(()=>openCheckout());
+  $('co-box').querySelectorAll('[data-crm]').forEach(b=>b.onclick=()=>{cart.splice(Number(b.dataset.crm),1);saveCart();requestDraw();if(route.view==='wall'&&!sel)renderSide();openCheckout()});
   $('co-box').querySelectorAll('[data-cgo]').forEach(b=>b.onclick=()=>{const c=cart[Number(b.dataset.cgo)];closeModal(checkout);
     const go=()=>flyToRect(c.idx,c.n);if(route.view!=='wall'){goTo('#wall');setTimeout(go,120)}else go()});
   $('co-pay').onclick=()=>{const err=m=>{$('co-err').textContent=m},u2=me();
     if(!u2)return err('Create your profile first.');
-    const email=$('co-email').value.trim().toLowerCase(),phone=$('co-phone').value.trim();
-    if(!/^\S+@\S+\.\S+$/.test(email))return err('Add a working email address.');
-    if(S.blocked.includes(email)||S.blockedUsers.includes(u2.uid))return err("This order can't be completed.");
     if(cart.some(c=>!freeCells(c.idx,c.n)))return err('One of your spots was just taken. Remove it and pick another.');
     if(!$('co-agree').checked)return err('Check the box to agree to the Community Rules.');
     if($('co-parent')&&!$('co-parent').checked)return err("Check the box to confirm your parent or guardian's OK.");
-    if(saved||($('co-save')&&$('co-save').checked)){wallet={last4:saved?wallet.last4:'4242',name:u2.name,email,phone};ls.set(wkey(),wallet)}
-    closeModal(checkout);placeOrder(u2,{name:u2.name,email,phone})};
+    startCheckout()};
   if(checkout.hidden)openModal(checkout,$('co-pay'));
 }
+/* Sends the cart to the checkout code on the server, which re-checks everything, holds the spots,
+   saves the pictures, and sends the buyer to Stripe's secure payment page. */
+async function startCheckout(){const btn=$('co-pay'),err=m=>{$('co-err').textContent=m};
+  if(!/^https?:/.test(location.protocol)){closeModal(checkout);infoPop({icon:'💳',title:'Checkout works on the live website',body:'This preview can’t take payments. Open your live site to place a real order.',claim:false,ok:'Got it'});return}
+  let token=null;try{const {data}=await SB.auth.getSession();token=data&&data.session&&data.session.access_token}catch(e){}
+  if(!token)return err('Please sign in again, then try once more.');
+  btn.disabled=true;btn.textContent='Opening secure checkout…';
+  try{
+    const r=await fetch('/api/checkout',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+token},
+      body:JSON.stringify({parentOk:!!($('co-parent')&&$('co-parent').checked),
+        items:cart.map(c=>{const p=colRow(c.idx);return{x:p.col,y:p.row,size:c.n,kind:c.kind,color:c.color||null,image:c.img||null,caption:c.caption||''}})})});
+    const d=await r.json().catch(()=>({}));
+    if(r.ok&&d.url){location.href=d.url;return}
+    if(d.code==='taken')loadWall(true);
+    err(d.error||'Couldn’t start checkout. Try again.');
+  }catch(e){err('Couldn’t reach checkout. Check your connection and try again.')}
+  btn.disabled=false;btn.textContent=`Continue to payment · ${money(cartTotal())}`}
+/* Coming back from Stripe: paid, or left without paying. */
+async function cancelOrder(id){try{const {data}=await SB.auth.getSession();const t=data&&data.session&&data.session.access_token;if(!t)return;
+  await fetch('/api/cancel',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+t},body:JSON.stringify({order:Number(id)})});loadWall(true)}catch(e){}}
+function checkoutReturn(){let q;try{q=new URLSearchParams(location.search)}catch(e){return}
+  const paid=q.get('paid'),canc=q.get('canceled');if(!paid&&!canc)return;
+  try{history.replaceState(null,'',location.pathname+(location.hash||'#wall'))}catch(e){}
+  if(paid){const items=cart.map(c=>({id:'tmp'+c.key,idx:c.idx,n:c.n,color:c.color,img:c.img,kind:c.kind,caption:c.caption}));
+    cart=[];saveCart();requestDraw();loadWall(true);
+    setTimeout(()=>{if(items.length)openShare(items,false);else infoPop({icon:'🎉',title:'Your order is in!',body:'Your card was checked, not charged. You’re charged only once it’s approved.',claim:false,ok:'Back to the wall'})},400)}
+  if(canc){cancelOrder(canc);toast('Checkout canceled. Your cart is still here.')}}
 /* One order = one card hold. On approval the server charges only the approved spots (Stripe allows one capture for less than the hold). */
 function placeOrder(u,buyer){
   const now=Date.now(),live=!S.settings.requireApproval,oid='o'+now.toString(36),ids=[];let total=0;
@@ -1786,7 +1801,7 @@ async function shareImage(it){
   g.fillStyle='#F2F4FB';g.font='700 40px "Atkinson Hyperlegible", sans-serif';g.fillText('1,000,000 squares. Once they’re gone, they’re gone.',Wd/2,1150);
   g.fillStyle='#FFC83D';g.font='400 42px Bungee, "Arial Black", sans-serif';g.fillText((/^https?:/.test(location.protocol)&&location.host?location.host:'pixelpurchase.com').toUpperCase(),Wd/2,1240);
   return c}
-async function openShare(ids,live){const it=S.items[ids[0]];if(!it)return;
+async function openShare(ids,live){const list=ids.map(x=>typeof x==='string'?S.items[x]:x).filter(Boolean),it=list[0];if(!it)return;
   const head=live?'You’re on the wall!':'Your order is in!';
   $('sh-box').innerHTML=`<h2 id="sh-h">${head}</h2><p class="muted">Making your share picture…</p>`;openModal(sharem);
   let cv2=null;try{cv2=await shareImage(it)}catch(e){}
@@ -1795,7 +1810,7 @@ async function openShare(ids,live){const it=S.items[ids[0]];if(!it)return;
   const text='I just claimed my spot on Pixel Purchase. One million squares, and once they’re gone, they’re gone.';
   $('sh-box').innerHTML=`<h2 id="sh-h">${head}</h2>
     <p class="muted">${live?'Show it off.':'You’re charged only once it’s approved. Show it off while you wait.'} Friends who claim spots next to yours become your wall neighbors.</p>
-    ${ids.some(id=>S.items[id]&&S.items[id].founding)?'<div class="notice gold">You got a Founding Pixel. Only 1,000 will ever exist.</div>':''}
+    ${list.some(i=>i.founding)?'<div class="notice gold">You got a Founding Pixel. Only 1,000 will ever exist.</div>':''}
     ${png?`<img class="shareimg" src="${png}" alt="Your share picture">`:''}
     <div class="acts" style="justify-content:center">
       <button class="btn primary big" id="sh-share">Share</button>
@@ -1923,7 +1938,7 @@ let tt;function toast(m){const el=$('toast');el.textContent=m;el.classList.add('
 function renderAll(){renderRules();renderSide();renderOwner();requestDraw()}
 setInterval(()=>{if(rollDay()){renderSide();requestDraw()}},60e3);
 $('cart-btn').onclick=()=>openCheckout();
-renderRules();renderMe();renderCartBtn();route();loadWall(true);
+renderRules();renderMe();renderCartBtn();route();loadWall(true);checkoutReturn();
 })();
 </script>
 </body>
