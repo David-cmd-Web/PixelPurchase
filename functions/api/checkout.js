@@ -70,8 +70,9 @@ export async function onRequestPost({ request, env }) {
     if (items.length > MAX_ITEMS) return json({ error: `Check out up to ${MAX_ITEMS} spots at a time.` }, 400);
 
     // Account rules (age group lives in a private table only the server can read here).
-    const pv = await readJson(await sb(env, `/rest/v1/account_private?user_id=eq.${user.id}&select=age_group`));
+    const pv = await readJson(await sb(env, `/rest/v1/account_private?user_id=eq.${user.id}&select=age_group,banned`));
     if (!Array.isArray(pv) || !pv[0]) return json({ error: 'Your profile isn’t finished. Sign out and back in.' }, 403);
+    if (pv[0].banned) return json({ error: 'This account can’t buy spots right now.' }, 403);
     if (pv[0].age_group === 'teen' && body.parentOk !== true)
       return json({ error: 'A parent or guardian’s OK is needed for this order.' }, 403);
 

@@ -663,7 +663,7 @@ function load(){const s=ls.get(KEY,null);if(s&&s.items&&s.users){s.settings.pass
 function save(){let mine=null;try{mine=ME}catch(e){}
   const items={},users={};for(const k in S.items){const i=S.items[k];if(!i.demo&&!i.remote)items[k]=i}
   for(const k in S.users){const u=S.users[k];if(!u.remote||k===mine)users[k]=u}
-  ls.set(KEY,{...S,items,users})}
+  ls.set(KEY,{...S,items,users,awards:(S.awards||[]).filter(a=>!a.remote)})}
 S=load();
 /* ---------- Supabase (live accounts) ----------
    The publishable key is meant to be public. The database rules protect the data. */
@@ -672,17 +672,21 @@ const SUPABASE_KEY='sb_publishable_1lMxX4ufv-dLpjKOq5xdOg_zXZ7XUCH';
 const SB=(()=>{try{if(window.supabase)return window.supabase.createClient(SUPABASE_URL,SUPABASE_KEY)}catch(e){}
   /* If the sign-in code can't load (offline, or inside a preview window), everything else on the page still works. */
   const off=async()=>({data:null,error:{message:'offline'}}),q={select:()=>q,eq:()=>q,in:()=>q,maybeSingle:off};
-  return {auth:{onAuthStateChange(){},getSession:async()=>({data:{session:null}}),signUp:off,signInWithPassword:off,signOut:async()=>({}),resend:off,resetPasswordForEmail:off,updateUser:off},from:()=>q,rpc:off}})();
+  return {off:true,auth:{onAuthStateChange(){},getSession:async()=>({data:{session:null}}),signUp:off,signInWithPassword:off,signOut:async()=>({}),resend:off,resetPasswordForEmail:off,updateUser:off},from:()=>q,rpc:off}})();
 const backTo=()=>/^https?:/.test(location.protocol)?location.origin+location.pathname:undefined;
 let ME=ls.get('pixelplot-me',null);
 const me=()=>ME&&S.users[ME]?S.users[ME]:null;
 /* Who follows whom and who liked what are stored per account, so signing in on any device shows your own. */
 S.follows=S.follows||[];S.likedBy=S.likedBy||{};
-const followersOf=uid=>S.follows.filter(f=>f[1]===uid).map(f=>f[0]);
-const followingOf=uid=>S.follows.filter(f=>f[0]===uid).map(f=>f[1]);
+/* RF = follows from the database, RL = pixels I liked on the database. Example (local) ones stay in S. */
+let RF=[],RL=new Set();
+const isDb=uid=>typeof uid==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(uid);
+const allFollows=()=>S.follows.concat(RF);
+const followersOf=uid=>[...new Set(allFollows().filter(f=>f[1]===uid).map(f=>f[0]))];
+const followingOf=uid=>[...new Set(allFollows().filter(f=>f[0]===uid).map(f=>f[1]))];
 const wkey=()=>'pp-wallet-'+(me()?me().uid:'guest');
 let liked=new Set(),following=new Set(),wallet=null;
-function loadMine(){const u=me();liked=new Set(u?(S.likedBy[u.uid]||[]):[]);following=new Set(u?followingOf(u.uid):[]);wallet=u?ls.get(wkey(),null):null}
+function loadMine(){const u=me();liked=new Set(u?[...(S.likedBy[u.uid]||[]),...(isDb(u.uid)?RL:[])]:[]);following=new Set(u?followingOf(u.uid):[]);wallet=u?ls.get(wkey(),null):null}
 loadMine();
 /* Cart: pick several spots and pay once (one card fee per order). Spots in the cart are held on this screen only;
    on the live site the server holds them for a few minutes at checkout. */
@@ -731,10 +735,24 @@ const nameLink=u=>u?`<span class="uname"><a href="#user-${u.handle}">${esc(u.nam
 function folBtn(u,cls){if(!u||(me()&&me().uid===u.uid))return '';const on=following.has(u.uid);return `<button class="${cls} ${on?'following':''}" data-follow="${u.uid}" aria-pressed="${on}">${on?'Following':'Follow'}</button>`}
 function toggleFollow(uid){const u=S.users[uid];if(!me()){openSignup(()=>toggleFollow(uid));return}
   const mid=me().uid;if(uid===mid)return;
-  if(following.has(uid))S.follows=S.follows.filter(f=>!(f[0]===mid&&f[1]===uid));else{S.follows.push([mid,uid]);toast(`You're following ${u.name}.`)}
-  loadMine();save();
-  document.querySelectorAll(`[data-follow="${uid}"]`).forEach(b=>{const on=following.has(uid);b.classList.toggle('following',on);b.setAttribute('aria-pressed',on);b.textContent=on?'Following':'Follow'});
+  if(isDb(uid)){if(!isDb(mid))return;const on=!following.has(uid);
+    if(on){RF.push([mid,uid]);toast(`You're following ${u.name}.`)}else RF=RF.filter(f=>!(f[0]===mid&&f[1]===uid));
+    (on?SB.from('follows').insert({followee:uid}):SB.from('follows').delete().eq('follower',mid).eq('followee',uid)).then(({error})=>{
+      if(!error||(on&&error.code==='23505'))return;
+      if(on)RF=RF.filter(f=>!(f[0]===mid&&f[1]===uid));else RF.push([mid,uid]);
+      loadMine();paintFollow(uid);if(route.view==='profile')renderProfile();toast(socialErr(error,'follow'))})}
+  else if(following.has(uid))S.follows=S.follows.filter(f=>!(f[0]===mid&&f[1]===uid));else{S.follows.push([mid,uid]);toast(`You're following ${u.name}.`)}
+  loadMine();save();paintFollow(uid);
   if(route.view==='profile')renderProfile()}
+function paintFollow(uid){
+  document.querySelectorAll(`[data-follow="${uid}"]`).forEach(b=>{const on=following.has(uid);b.classList.toggle('following',on);b.setAttribute('aria-pressed',on);b.textContent=on?'Following':'Follow'})}
+/* Friendly messages for likes, comments, follows and reports the database turns down. */
+function socialErr(error,what){const m=(error&&error.message||'')+' '+(error&&error.code||'');
+  if(/PP_SLOW_DOWN/.test(m))return 'Slow down a little. You can comment again in a few minutes.';
+  if(/23514/.test(m))return "That can't be posted. Try different words.";
+  if(/42501|row-level security/.test(m))return `Your account can't ${what} right now.`;
+  if(/offline/.test(m))return 'That only works on the live website.';
+  return "Couldn't save that. Check your connection and try again."}
 document.addEventListener('click',e=>{const b=e.target.closest('[data-follow]');if(b){e.preventDefault();toggleFollow(b.dataset.follow)}});
 function makeUser(name,handle,email,pw){let h=slug(handle||name)||'pixel',base=h,i=2;while(userByHandle(h))h=base+'-'+(i++);
   const uid='u'+Date.now().toString(36)+Math.floor(Math.random()*1e4).toString(36);S.users[uid]={uid,name,handle:h,verified:false,email,pw,joined:Date.now(),best:null,games:0,found:0};return uid}
@@ -751,11 +769,12 @@ async function adoptSession(session){
   const id=session.user.id;
   const [{data:p},{data:pv}]=await Promise.all([
     SB.from('profiles').select('id,handle,name,verified,created_at').eq('id',id).maybeSingle(),
-    SB.from('account_private').select('age_group').eq('user_id',id).maybeSingle()]);
+    SB.from('account_private').select('age_group,banned').eq('user_id',id).maybeSingle()]);
   if(!p)return null;
+  if(pv&&pv.banned){try{await SB.auth.signOut()}catch(e){}if(ME===id)clearMe();refreshViews();return 'banned'}
   const old=S.users[id]||{best:null,games:0,found:0};
   S.users[id]={...old,remote:false,uid:id,name:p.name,handle:p.handle,verified:p.verified,email:session.user.email,joined:Date.parse(p.created_at),ageGroup:pv?pv.age_group:old.ageGroup};
-  save();if(ME!==id)setMe(id);else renderMe();refreshViews();return S.users[id]}
+  save();if(ME!==id)setMe(id);else renderMe();refreshViews();loadSocial();return S.users[id]}
 SB.auth.onAuthStateChange((event,session)=>{
   if(event==='PASSWORD_RECOVERY'){setTimeout(openNewPassword,0);return}
   if(event==='SIGNED_OUT'){clearOwner();if(ME){clearMe();refreshViews()}return}
@@ -1054,6 +1073,7 @@ function openSignin(then,keep){if(!keep)afterSignup=then||null;
           $('si-resend').onclick=async()=>{const r=await SB.auth.resend({type:'signup',email,options:{emailRedirectTo:backTo()}});toast(r.error?authErr(r.error):'Sent. Check your email.')};return}
         return err(m.includes('invalid')?"That email and password don't match.":esc(authErr(error)))}
       const u=await adoptSession(data.session);b.disabled=false;
+      if(u==='banned')return err("This profile can't sign in right now.");
       if(!u)return err('Signed in, but your profile could not be loaded. Try again.');
       if(S.blockedUsers.includes(u.uid)){await SB.auth.signOut();clearMe();return err("This profile can't sign in right now.")}
       closeModal(signup);toast(`Welcome back, ${u.name}.`);const f=afterSignup;afterSignup=null;if(f)f();refreshViews();
@@ -1068,14 +1088,21 @@ function openSignin(then,keep){if(!keep)afterSignup=then||null;
   if(signup.hidden)openModal(signup,$('si-email'));else $('si-email').focus()}
 
 /* ---------- comments ---------- */
-let cmItem=null;
-function commentsOf(id){return (S.comments[id]||[]).filter(c=>!S.blockedUsers.includes(c.uid))}
-function openComments(id){cmItem=id;renderComments();openModal(cmodal,$('cm-in')||$('cm-close'))}
-function renderComments(){const it=S.items[cmItem];if(!it){closeModal(cmodal);return}const list=commentsOf(cmItem),u=me();
-  $('cm-box').innerHTML=`<div class="cm-head"><h2 id="cm-h">${fmt(list.length)} comment${list.length===1?'':'s'}</h2><button class="btn" id="cm-close">Close</button></div>
+let cmItem=null;const RC={};
+function commentsOf(id){const it=S.items[id];if(it&&it.remote)return RC[id]||[];return (S.comments[id]||[]).filter(c=>!S.blockedUsers.includes(c.uid))}
+const ccount=it=>it.remote?(RC[it.id]?RC[it.id].length:(it.ccount||0)):commentsOf(it.id).length;
+async function fetchComments(id){const it=S.items[id];if(!it||!it.remote)return;
+  const {data,error}=await SB.from('comments').select('id,user_id,body,created_at').eq('spot_id',Number(id.slice(2))).order('created_at',{ascending:true}).limit(300);
+  if(error){if(cmItem===id&&!RC[id])$('cm-list').innerHTML='<p class="muted">Comments couldn’t load. Check your connection and try again.</p>';return}
+  await needProfiles((data||[]).map(c=>c.user_id));
+  RC[id]=(data||[]).map(c=>({id:'k'+c.id,dbid:c.id,uid:c.user_id,text:c.body,time:Date.parse(c.created_at)}));it.ccount=RC[id].length;
+  if(cmItem===id&&!cmodal.hidden)renderComments();refreshCounts(id)}
+function openComments(id){cmItem=id;const it=S.items[id];if(it&&it.remote){delete RC[id];fetchComments(id)}renderComments();openModal(cmodal,$('cm-in')||$('cm-close'))}
+function renderComments(){const it=S.items[cmItem];if(!it){closeModal(cmodal);return}const list=commentsOf(cmItem),u=me(),loading=it.remote&&!RC[cmItem];
+  $('cm-box').innerHTML=`<div class="cm-head"><h2 id="cm-h">${loading?'Comments':`${fmt(list.length)} comment${list.length===1?'':'s'}`}</h2><button class="btn" id="cm-close">Close</button></div>
     <p class="muted" style="font-size:13px">On ${esc(it.caption||titleOf(it))}</p>
     <div class="cm-list" id="cm-list">${list.length?list.map(c=>{const cu=S.users[c.uid];return `<div class="cm">${avatar(cu)}<div style="min-width:0">
-      <div>${nameLink(cu)}</div><p class="txt">${esc(c.text)}</p><div class="meta"><span>${ago(c.time)}</span>${u&&u.uid===c.uid?`<button data-cdel="${c.id}">Delete</button>`:`<button data-crep="${c.id}">Report</button>`}</div></div></div>`}).join(''):'<p class="muted">No comments yet. Say something nice.</p>'}</div>
+      <div>${nameLink(cu)}</div><p class="txt">${esc(c.text)}</p><div class="meta"><span>${ago(c.time)}</span>${u&&u.uid===c.uid?`<button data-cdel="${c.id}">Delete</button>`:`<button data-crep="${c.id}">Report</button>`}</div></div></div>`}).join(''):loading?'<p class="muted">Loading comments…</p>':'<p class="muted">No comments yet. Say something nice.</p>'}</div>
     ${u?`<div class="cm-form"><input id="cm-in" maxlength="150" placeholder="Add a comment" aria-label="Add a comment"><button class="btn primary" id="cm-post">Post</button></div><p class="formerr" id="cm-err"></p>`
       :`<div class="cm-form" style="justify-content:center"><button class="btn primary" id="cm-sign">Sign up to comment</button></div>`}`;
   $('cm-close').onclick=()=>closeModal(cmodal);
@@ -1083,13 +1110,26 @@ function renderComments(){const it=S.items[cmItem];if(!it){closeModal(cmodal);re
   if(u){const post=()=>{const t=$('cm-in').value.trim();if(!t)return;
       if(S.blockedUsers.includes(u.uid))return $('cm-err').textContent="You can't comment right now.";
       if(!textOK(t))return $('cm-err').textContent="That comment can't be posted. Try different words.";
+      if(it.remote){if(!isDb(u.uid))return;const id=cmItem,b=$('cm-post');b.disabled=true;
+        SB.from('comments').insert({spot_id:Number(id.slice(2)),body:t}).select('id,created_at').single().then(({data,error})=>{b.disabled=false;
+          if(error){$('cm-err').textContent=socialErr(error,'comment');return}
+          (RC[id]=RC[id]||[]).push({id:'k'+data.id,dbid:data.id,uid:u.uid,text:t,time:Date.parse(data.created_at)||Date.now()});it.ccount=RC[id].length;
+          if(cmItem===id){renderComments();$('cm-in').focus()}refreshCounts(id)});return}
       (S.comments[cmItem]=S.comments[cmItem]||[]).push({id:'c'+Date.now(),uid:u.uid,text:t,time:Date.now()});save();renderComments();$('cm-in').focus();refreshCounts(cmItem)};
     $('cm-post').onclick=post;$('cm-in').onkeydown=e=>{if(e.key==='Enter')post()}}
   else $('cm-sign').onclick=()=>{closeModal(cmodal);openSignup(()=>openComments(cmItem))};
-  l.querySelectorAll('[data-crep]').forEach(b=>b.onclick=()=>{S.creports.push({id:'cr'+Date.now(),itemId:cmItem,cid:b.dataset.crep,time:Date.now()});save();b.textContent='Reported';b.disabled=true;toast('Thanks. The comment will be reviewed.')});
-  l.querySelectorAll('[data-cdel]').forEach(b=>b.onclick=()=>{S.comments[cmItem]=(S.comments[cmItem]||[]).filter(c=>c.id!==b.dataset.cdel);save();renderComments();refreshCounts(cmItem)});
+  const rc=id=>(RC[cmItem]||[]).find(c=>c.id===id);
+  l.querySelectorAll('[data-crep]').forEach(b=>b.onclick=()=>{
+    if(it.remote){const c=rc(b.dataset.crep);if(!c)return;if(!me()){closeModal(cmodal);openSignup(()=>openComments(cmItem));return}b.disabled=true;
+      SB.from('reports').insert({comment_id:c.dbid}).then(({error})=>{if(error&&error.code!=='23505'){b.disabled=false;toast(socialErr(error,'report'));return}b.textContent='Reported';toast('Thanks. The comment will be reviewed.')});return}
+    S.creports.push({id:'cr'+Date.now(),itemId:cmItem,cid:b.dataset.crep,time:Date.now()});save();b.textContent='Reported';b.disabled=true;toast('Thanks. The comment will be reviewed.')});
+  l.querySelectorAll('[data-cdel]').forEach(b=>b.onclick=()=>{
+    if(it.remote){const c=rc(b.dataset.cdel),id=cmItem;if(!c)return;b.disabled=true;
+      SB.from('comments').delete().eq('id',c.dbid).then(({error})=>{if(error){b.disabled=false;toast(socialErr(error,'delete comments'));return}
+        RC[id]=(RC[id]||[]).filter(x=>x!==c);it.ccount=RC[id].length;if(cmItem===id)renderComments();refreshCounts(id)});return}
+    S.comments[cmItem]=(S.comments[cmItem]||[]).filter(c=>c.id!==b.dataset.cdel);save();renderComments();refreshCounts(cmItem)});
 }
-function refreshCounts(id){const n=commentsOf(id).length;document.querySelectorAll(`[data-ccount="${id}"]`).forEach(el=>el.textContent=fmt(n));if(sel&&sel.type==='item'&&sel.id===id&&route.view==='wall')renderSide()}
+function refreshCounts(id){const it=S.items[id];if(!it)return;const n=ccount(it);document.querySelectorAll(`[data-ccount="${id}"]`).forEach(el=>el.textContent=fmt(n));if(sel&&sel.type==='item'&&sel.id===id&&route.view==='wall')renderSide()}
 
 /* ---------- drawing pad + starter designs ---------- */
 const PALETTE=['#1B2550','#FFFFFF','#FF5D5D','#FFB13D','#FFE14D','#5BD67A','#2DD4BF','#3DB8FF','#6C6CFF','#C66BFF','#FF7AC6','#8B5A2B'];
@@ -1185,7 +1225,7 @@ function renderSide(){
 }
 function renderItem(it){
   if(!it){clearSel();return}
-  const live=it.status==='live',isLiked=liked.has(it.id),aw=awardsOf(it.id),u=S.users[it.owner],nc=commentsOf(it.id).length,mine=me()&&me().uid===it.owner;
+  const live=it.status==='live',isLiked=liked.has(it.id),aw=awardsOf(it.id),u=S.users[it.owner],nc=ccount(it),mine=me()&&me().uid===it.owner;
   side.innerHTML=`<div><h2>${titleOf(it)}</h2><p class="coords">${it.n>1?`${it.n*it.n} pixels from `:''}${where(it.idx)}</p></div>
     ${u?`<div class="who-row">${avatar(u)}<div style="flex:1;min-width:0">${nameLink(u)}<div class="handle">@${esc(u.handle)}</div></div>${folBtn(u,'btn')}</div>`:''}
     <div class="bigtile" style="${live?`background-image:url('${thumb(it)}')`:'background:var(--pending)'}"></div>
@@ -1205,9 +1245,20 @@ function renderItem(it){
   $('d-cm').onclick=()=>openComments(it.id);
   $('d-share').onclick=()=>share(it);
   const rep=$('rep');if(rep)rep.onclick=()=>{const reason=side.querySelector('input[name=rr]:checked').value,now=Date.now();
+    if(it.remote){if(!me()){openSignup(()=>renderItem(it));return}rep.disabled=true;
+      SB.from('reports').insert({spot_id:Number(it.id.slice(2)),reason}).then(({error})=>{rep.disabled=false;
+        if(error&&error.code!=='23505'){toast(socialErr(error,'report'));return}toast('Thanks. This will be reviewed.');const d=side.querySelector('details');if(d)d.open=false});return}
     S.reports.unshift({id:'r'+now,itemId:it.id,reason,time:now});save();toast('Thanks. This will be reviewed.');side.querySelector('details').open=false};
 }
-function toggleLike(it){if(!me())return;rollDay();const d=S.daily.likes;
+function toggleLike(it){if(!me())return;
+  if(it.remote){const mid=me().uid;if(!isDb(mid))return;const sid=Number(it.id.slice(2)),on=!liked.has(it.id);
+    const flip=v=>{if(v){RL.add(it.id);liked.add(it.id);it.likes=(it.likes||0)+1}else{RL.delete(it.id);liked.delete(it.id);it.likes=Math.max(0,(it.likes||0)-1)}};
+    flip(on);
+    (on?SB.from('likes').insert({spot_id:sid}):SB.from('likes').delete().eq('spot_id',sid).eq('user_id',mid)).then(({error})=>{
+      if(!error||(on&&error.code==='23505'))return;
+      flip(!on);toast(socialErr(error,'like'));refreshViews();if(route.view==='feed')buildFeed()});
+    return}
+  rollDay();const d=S.daily.likes;
   if(liked.has(it.id)){liked.delete(it.id);it.likes=Math.max(0,(it.likes||0)-1);d[it.id]=Math.max(0,(d[it.id]||0)-1)}else{liked.add(it.id);it.likes=(it.likes||0)+1;d[it.id]=(d[it.id]||0)+1}
   S.likedBy[me().uid]=[...liked];save()}
 function share(it){const url=location.href.split('#')[0]+'#pixel-'+pixNum(it.idx);
@@ -1485,7 +1536,7 @@ function champCard(){const ch=champ(),u=S.users[ch.uid],d=document.createElement
     <a class="btn primary big" href="#game">Try to beat it</a>`;return d}
 function feedCard(it){
   const d=document.createElement('section');d.className='fcard';d.dataset.id=it.id;
-  const on=liked.has(it.id),w=potd(),aw=awardsOf(it.id),u=S.users[it.owner],nc=commentsOf(it.id).length;
+  const on=liked.has(it.id),w=potd(),aw=awardsOf(it.id),u=S.users[it.owner],nc=ccount(it);
   d.style.setProperty('--amb',art(it).avg||'#2A3260');
   const badges=[];
   if(w&&w.id===it.id)badges.push(`<span class="fbadge gold">Pixel of the Day${aw.length>1?` ×${aw.length}`:''}</span>`);
@@ -1615,10 +1666,12 @@ function renderOwner(){
   S.reports=S.reports.filter(r=>S.items[r.itemId]);
   const ac=allComments(),repIds=new Set(S.creports.map(r=>r.cid));S.creports=S.creports.filter(r=>ac.some(c=>c.id===r.cid));
   S.orders=S.orders||{};const allOrders=Object.values(S.orders),waiting=allOrders.filter(o=>o.status==='waiting').sort((a,b)=>a.time-b.time);
-  const nReview=(od?od.pending.length:0)+S.reports.length,unread=allOrders.filter(o=>!o.read).length,liveAll=items.filter(t=>t.status==='live');
+  const sRep=od?od.reports.filter(r=>r.spot_id&&r.spot):[],cRep=od?od.reports.filter(r=>r.comment_id&&r.comment):[];
+  const nReview=(od?od.pending.length:0)+S.reports.length+sRep.length,unread=allOrders.filter(o=>!o.read).length,liveAll=items.filter(t=>t.status==='live');
   $('c-review').textContent=nReview;$('c-review').classList.toggle('hot',nReview>0);
   $('c-live').textContent=fmt(liveAll.length);
-  $('c-comments').textContent=S.creports.length||ac.length;$('c-comments').classList.toggle('hot',S.creports.length>0);
+  const nCrep=S.creports.length+cRep.length;
+  $('c-comments').textContent=nCrep||ac.length+(od?od.comments.length:0);$('c-comments').classList.toggle('hot',nCrep>0);
   $('c-people').textContent=fmt(Object.keys(S.users).length);
   $('c-inbox').textContent=od?od.pending.length+od.recent.length:0;$('c-inbox').classList.remove('hot');
   document.querySelectorAll('[data-otab]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.otab===otab));
@@ -1637,7 +1690,11 @@ function renderOwner(){
           return `<div class="oitem" style="${off?'opacity:.4':''}"><div class="thumb" style="${bg}"></div><div style="min-width:0"><b style="font-size:14px">${x.size===1?'Pixel':x.size+'×'+x.size+' block'} · ${money(priceOf(x.size))}${x.founding?' · Founding':''}</b><div class="meta">${where(x.y*COLS+x.x)} · ${x.caption?`"${esc(x.caption)}"`:'No caption'}</div></div>${o.spots.length>1?`<button class="btn ${off?'':'danger'}" data-sact="toggle" data-oid="${o.id}" data-sid="${x.id}">${off?'Keep':'Remove'}</button>`:''}</div>`}).join('')}</div>
         <div class="acts">${keep.length?`<button class="btn ok" data-sact="approve" data-oid="${o.id}">Approve and charge ${money(sum)}</button>`:''}<button class="btn danger" data-sact="decline" data-oid="${o.id}">Decline${keep.length?'':' the whole order'}</button></div></div></div>`}):[];
     const status=ownerErr?`<div class="notice" style="border-color:var(--bad)">${esc(ownerErr)} <button class="linkbtn" data-sact="retry">Try again</button></div>`:(!od?'<p class="empty">Loading orders…</p>':'');
-    $('review').innerHTML=status+(rep.concat(pen).join('')||(od?'<p class="empty">All caught up. Nothing to review.</p>':''));
+    const srep=sRep.map(r=>{const x=r.spot,it=S.items['db'+x.id],bg=x.kind==='color'?`background:${x.color}`:x.image_path?`background-image:url('${PIC_URL(x.image_path)}')`:'',p=od.people[x.owner_id]||{};
+      return `<div class="item flag"><div class="thumb" style="${bg}"></div><div style="min-width:0"><div class="t">Reported · ${x.size===1?'Pixel':x.size+'×'+x.size+' block'}${x.status!=='live'?' · already down':''}</div>
+        <div class="meta">${agoS(Date.parse(r.created_at))} · ${esc(r.reason||'')}${x.caption?` · "${esc(x.caption)}"`:''}</div><div class="who">${esc(p.name||'')} @${esc(p.handle||'')}</div>
+        <div class="acts">${x.status==='live'?`<button class="btn danger" data-sact="takedown" data-spot="${x.id}">Take down</button>`:''}<button class="btn" data-sact="dismiss" data-rep="${r.id}">Keep it</button>${it?B('view',it.id,'See on wall'):''}</div></div></div>`});
+    $('review').innerHTML=status+(rep.concat(srep,pen).join('')||(od?'<p class="empty">All caught up. Nothing to review.</p>':''));
   }
   if(otab==='wall'){
     const q=$('q').value.trim().toLowerCase(),sort=$('sort').value;let live=liveAll;
@@ -1648,16 +1705,22 @@ function renderOwner(){
       +(live.length>40?`<p class="empty">Showing 40 of ${fmt(live.length)}. Search to find others.</p>`:'');
   }
   if(otab==='comments'){
+    const sc=new Map();if(od){od.comments.forEach(c=>sc.set(c.id,{...c,reps:[]}));cRep.forEach(r=>{const c=sc.get(r.comment.id)||{...r.comment,reps:[]};c.reps.push(r);sc.set(c.id,c)})}
+    const srv=[...sc.values()].sort((a,b)=>(b.reps.length>0)-(a.reps.length>0)||Date.parse(b.created_at)-Date.parse(a.created_at)).slice(0,100).map(c=>{const p=od.people[c.user_id]||{},bl=od.banned.includes(c.user_id),it=S.items['db'+c.spot_id];
+      return orow(it,`<button class="btn danger" data-sact="delcomment" data-cid="${c.id}">Delete</button>${c.reps.map(r=>`<button class="btn" data-sact="dismiss" data-rep="${r.id}">Keep it</button>`).slice(0,1).join('')}${bl?'':`<button class="btn danger" data-sact="ban" data-uid="${c.user_id}" data-on="1">Block user</button>`}`,
+        `<div class="t">${c.reps.length?'Reported · ':''}${esc(p.name||'Someone')} <span class="handle">@${esc(p.handle||'')}</span>${bl?' · blocked':''}</div><div class="meta">"${esc(c.body)}" · ${agoS(Date.parse(c.created_at))}${it?` · on ${esc(it.caption||titleOf(it))}`:''}</div>`,c.reps.length?'flag':'')});
     const list=ac.sort((a,b)=>(repIds.has(b.id)-repIds.has(a.id))||b.time-a.time).slice(0,60);
-    $('comments').innerHTML=list.length?list.map(c=>{const u=S.users[c.uid],it=S.items[c.itemId];return orow(it,`<button class="btn danger" data-cact="del" data-cid="${c.id}" data-item="${c.itemId}">Delete</button>${repIds.has(c.id)?`<button class="btn" data-cact="keep" data-cid="${c.id}">Keep it</button>`:''}<button class="btn danger" data-cact="blockuser" data-uid="${c.uid}">Block user</button>`,
-      `<div class="t">${repIds.has(c.id)?'Reported · ':''}${esc(u?u.name:'Someone')} <span class="handle">@${esc(u?u.handle:'')}</span></div><div class="meta">"${esc(c.text)}" · ${agoS(c.time)}${it?` · on ${esc(it.caption||titleOf(it))}`:''}</div>`,repIds.has(c.id)?'flag':'')}).join(''):'<p class="empty">No comments yet.</p>';
+    $('comments').innerHTML=(srv.length||list.length)?srv.join('')+list.map(c=>{const u=S.users[c.uid],it=S.items[c.itemId];return orow(it,`<button class="btn danger" data-cact="del" data-cid="${c.id}" data-item="${c.itemId}">Delete</button>${repIds.has(c.id)?`<button class="btn" data-cact="keep" data-cid="${c.id}">Keep it</button>`:''}<button class="btn danger" data-cact="blockuser" data-uid="${c.uid}">Block user</button>`,
+      `<div class="t">${repIds.has(c.id)?'Reported · ':''}${esc(u?u.name:'Someone')} <span class="handle">@${esc(u?u.handle:'')}</span></div><div class="meta">"${esc(c.text)}" · ${agoS(c.time)}${it?` · on ${esc(it.caption||titleOf(it))}`:''}</div>`,repIds.has(c.id)?'flag':'')}).join(''):(od?'<p class="empty">No comments yet.</p>':'<p class="empty">Loading comments…</p>');
   }
   if(otab==='people'){
-    const q=$('pq').value.trim().toLowerCase();let us=Object.values(S.users);if(q)us=us.filter(u=>u.name.toLowerCase().includes(q)||u.handle.includes(q));
+    if(od)for(const id in od.people)if(!S.users[id]){const p=od.people[id];S.users[id]={uid:id,name:p.name||p.handle||'',handle:p.handle||'',verified:!!p.verified,remote:true}}
+    const q=$('pq').value.trim().toLowerCase();let us=Object.values(S.users).filter(u=>u.handle);if(q)us=us.filter(u=>u.name.toLowerCase().includes(q)||u.handle.includes(q));
     us.sort((a,b)=>followersOf(b.uid).length-followersOf(a.uid).length);
-    $('people').innerHTML=us.slice(0,50).map(u=>{const bl=S.blockedUsers.includes(u.uid);return `<div class="item" style="grid-template-columns:40px minmax(0,1fr)">${avatar(u)}<div style="min-width:0"><div class="t">${nameLink(u)} <span class="handle">@${esc(u.handle)}</span></div>
+    $('people').innerHTML=us.slice(0,50).map(u=>{const db=isDb(u.uid),bl=db?!!(od&&od.banned.includes(u.uid)):S.blockedUsers.includes(u.uid),mineAcct=me()&&me().uid===u.uid;return `<div class="item" style="grid-template-columns:40px minmax(0,1fr)">${avatar(u)}<div style="min-width:0"><div class="t">${nameLink(u)} <span class="handle">@${esc(u.handle)}</span></div>
       <div class="meta">${fmt(followersOf(u.uid).length)} followers · ${itemsOf(u.uid).length} on the wall${bl?' · blocked':''}</div>
-      <div class="acts"><button class="btn ${u.verified?'':'ok'}" data-pact="verify" data-uid="${u.uid}">${u.verified?'Remove verified':'Verify'}</button><button class="btn ${bl?'':'danger'}" data-pact="block" data-uid="${u.uid}">${bl?'Unblock':'Block'}</button><a class="btn" href="#user-${u.handle}">Profile</a></div></div></div>`}).join('')||'<p class="empty">No one matches.</p>';
+      <div class="acts">${db?`<button class="btn ${u.verified?'':'ok'}" data-sact="verify" data-uid="${u.uid}" data-on="${u.verified?'':'1'}">${u.verified?'Remove verified':'Verify'}</button>${mineAcct?'':`<button class="btn ${bl?'':'danger'}" data-sact="ban" data-uid="${u.uid}" data-on="${bl?'':'1'}">${bl?'Unblock':'Block'}</button>`}`
+        :`<button class="btn ${u.verified?'':'ok'}" data-pact="verify" data-uid="${u.uid}">${u.verified?'Remove verified':'Verify'}</button><button class="btn ${bl?'':'danger'}" data-pact="block" data-uid="${u.uid}">${bl?'Unblock':'Block'}</button>`}<a class="btn" href="#user-${u.handle}">Profile</a></div></div></div>`}).join('')||'<p class="empty">No one matches.</p>';
   }
   if(otab==='inbox'){
     const all=od?od.pending.map(o=>({...o,status:'pending'})).concat(od.recent):[];
@@ -1667,7 +1730,8 @@ function renderOwner(){
   }
   if(otab==='settings'){
     $('s-approve').checked=true;$('s-approve').disabled=true;
-    $('blocked').innerHTML=S.blocked.length?S.blocked.map(e=>`<div class="blocked"><span>${esc(e)}</span><button class="btn" data-act="unblock" data-email="${esc(e)}">Unblock</button></div>`).join(''):'<p class="empty">Nobody is blocked.</p>';
+    const bAcc=od?od.banned.map(id=>`<div class="blocked"><span>${esc((od.people[id]||{}).name||'Someone')} @${esc((od.people[id]||{}).handle||'')}</span><button class="btn" data-sact="ban" data-uid="${id}" data-on="">Unblock</button></div>`):[];
+    $('blocked').innerHTML=(bAcc.length||S.blocked.length)?bAcc.join('')+S.blocked.map(e=>`<div class="blocked"><span>${esc(e)}</span><button class="btn" data-act="unblock" data-email="${esc(e)}">Unblock</button></div>`).join(''):'<p class="empty">Nobody is blocked.</p>';
     $('math').innerHTML=`Only you see this.<br>${od?`Pixels live: ${fmt(od.totals.pixels_live)} of ${fmt(TOTAL)} · ${money(od.totals.charged_cents/100)} charged`:'Loading totals…'}<br>Full wall at $1.49 a pixel: ${money(Math.round(TOTAL*1.49))}<br>You keep about $1.13 a pixel on singles and $1.07 to $1.14 on blocks after card fees<br>Approve within 7 days, or the card hold expires and the buyer has to re-order.`;
   }
 }
@@ -1838,6 +1902,21 @@ async function openShare(ids,live){const list=ids.map(x=>typeof x==='string'?S.i
    They're never stored in the browser; they reload fresh on every visit and every minute. */
 const PIC_URL=path=>`${SUPABASE_URL}/storage/v1/object/public/pixels/${String(path).split('/').map(encodeURIComponent).join('/')}`;
 let serverFoundLeft=null,wallLoading=false,wallLoadedAt=0;
+/* Follows, my likes, and Pixel of the Day winners from the database. */
+async function needProfiles(ids){const need=[...new Set(ids)].filter(u=>isDb(u)&&!S.users[u]).slice(0,500);if(!need.length||SB.off)return;
+  try{const {data:ps}=await SB.from('profiles').select('id,handle,name,verified').in('id',need);
+    (ps||[]).forEach(p=>{S.users[p.id]={...(S.users[p.id]||{}),uid:p.id,name:p.name,handle:p.handle,verified:p.verified,remote:p.id!==ME}})}catch(e){}}
+let socialBusy=false;
+async function loadSocial(quiet){if(SB.off||socialBusy)return;socialBusy=true;
+  try{const mid=me()&&isDb(me().uid)?me().uid:null;
+    const [f,l,w]=await Promise.all([SB.from('follows').select('follower,followee').limit(5000),
+      mid?SB.from('likes').select('spot_id').eq('user_id',mid).limit(5000):Promise.resolve({data:[]}),
+      SB.rpc('pp_daily_winners',{p_days:30})]);
+    if(f&&Array.isArray(f.data)){RF=f.data.map(r=>[r.follower,r.followee]);await needProfiles(f.data.flatMap(r=>[r.follower,r.followee]))}
+    if(l&&Array.isArray(l.data))RL=new Set(l.data.map(r=>'db'+r.spot_id));
+    if(w&&Array.isArray(w.data))S.awards=w.data.map(r=>({date:r.day,id:'db'+r.spot_id,likes:r.likes,remote:true})).concat((S.awards||[]).filter(a=>!a.remote)).sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:0);
+    loadMine();if(!quiet)refreshViews();
+  }catch(e){}finally{socialBusy=false}}
 async function loadWall(force){
   if(wallLoading||(!force&&Date.now()-wallLoadedAt<20e3))return;wallLoading=true;
   try{
@@ -1848,12 +1927,13 @@ async function loadWall(force){
     const owners=new Set();
     rows.forEach(r=>{const id='db'+r.id,live=r.state==='live',old=keep[id]||{};
       const it={id,remote:true,idx:r.y*COLS+r.x,n:r.size,status:live?'live':'pending',caption:r.caption||'',owner:r.owner_id||null,founding:!!r.founding,
-        postedAt:r.live_at?Date.parse(r.live_at):null,boughtAt:r.live_at?Date.parse(r.live_at):Date.now(),views:old.views||0,likes:old.likes||0,buyer:{name:'',email:''}};
+        postedAt:r.live_at?Date.parse(r.live_at):null,boughtAt:r.live_at?Date.parse(r.live_at):Date.now(),views:old.views||0,likes:r.likes!=null?r.likes:(old.likes||0),ccount:r.comments!=null?r.comments:(old.ccount||0),buyer:{name:'',email:''}};
       if(live){if(r.kind==='color'&&r.color)it.color=r.color;else if(r.image_path){it.img=PIC_URL(r.image_path);it.kind=r.kind}else it.color='#8E88AE'}
       S.items[id]=it;if(r.owner_id)owners.add(r.owner_id)});
     const need=[...owners].filter(u=>!S.users[u]).slice(0,500);
     if(need.length){const {data:ps}=await SB.from('profiles').select('id,handle,name,verified').in('id',need);
       (ps||[]).forEach(p=>{S.users[p.id]={...(S.users[p.id]||{}),uid:p.id,name:p.name,handle:p.handle,verified:p.verified,remote:p.id!==ME}})}
+    await loadSocial(true);
     wallLoadedAt=Date.now();rebuild();requestDraw();
     if(route.view==='wall'&&!sel)renderSide();
     if(route.view==='profile')renderProfile();
@@ -1875,20 +1955,25 @@ async function ownerCall(action,extra={}){
   if(!r.ok)throw new Error(d.error||'Something went wrong. Try again.');
   return d}
 async function loadOwner(){if(ownerLoading)return;ownerLoading=true;ownerErr=null;
-  try{ownerData=await ownerCall('list')}catch(e){if(e.message!=='locked')ownerErr=e.message}
+  try{const d=await ownerCall('list');ownerData={pending:[],recent:[],reports:[],comments:[],banned:[],people:{},totals:{charged_cents:0,pixels_live:0},...d}}catch(e){if(e.message!=='locked')ownerErr=e.message}
   finally{ownerLoading=false;renderOwner()}}
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-sact]');if(!b)return;e.preventDefault();
   const a=b.dataset.sact,oid=Number(b.dataset.oid);
   if(a==='retry'){ownerErr=null;loadOwner();return}
   if(a==='toggle'){const set=ownerRemove[oid]||(ownerRemove[oid]=new Set()),sid=Number(b.dataset.sid);set.has(sid)?set.delete(sid):set.add(sid);renderOwner();return}
-  const key=a+(b.dataset.oid||b.dataset.spot);
-  if(ownerArmed!==key){ownerArmed=key;b.textContent=a==='approve'?'Tap again to charge the card':a==='decline'?'Tap again to decline':'Tap again to take it down';
+  const on=b.dataset.on==='1',confirm={approve:'Tap again to charge the card',decline:'Tap again to decline',takedown:'Tap again to take it down',delcomment:'Tap again to delete',ban:on?'Tap again to block':null}[a];
+  const key=a+(b.dataset.oid||b.dataset.spot||b.dataset.cid||b.dataset.uid||b.dataset.rep);
+  if(confirm&&ownerArmed!==key){ownerArmed=key;b.textContent=confirm;
     setTimeout(()=>{if(ownerArmed===key){ownerArmed=null;renderOwner()}},4000);return}
-  ownerArmed=null;b.disabled=true;b.textContent=a==='approve'?'Charging…':a==='decline'?'Declining…':'Taking down…';
+  ownerArmed=null;b.disabled=true;b.textContent={approve:'Charging…',decline:'Declining…',takedown:'Taking down…'}[a]||'Saving…';
   try{
     if(a==='approve'){const d=await ownerCall('approve',{order:oid,remove:[...(ownerRemove[oid]||[])]});delete ownerRemove[oid];toast(`Approved. Charged ${money(d.charged_cents/100)}. It’s live on the wall.`)}
     if(a==='decline'){await ownerCall('decline',{order:oid});delete ownerRemove[oid];toast('Declined. The card was never charged.')}
     if(a==='takedown'){await ownerCall('takedown',{spot:Number(b.dataset.spot)});toast('Taken down. That spot is open again.')}
+    if(a==='delcomment'){await ownerCall('delcomment',{comment:Number(b.dataset.cid)});toast('Comment deleted.')}
+    if(a==='dismiss'){await ownerCall('dismiss',{report:Number(b.dataset.rep)});toast('Kept. Report cleared.')}
+    if(a==='ban'){await ownerCall('ban',{user:b.dataset.uid,on});toast(on?'Blocked. They can’t post or buy, and their comments are hidden.':'Unblocked.')}
+    if(a==='verify'){await ownerCall('verify',{user:b.dataset.uid,on});const u=S.users[b.dataset.uid];if(u){u.verified=on;toast(on?`@${u.handle} is verified.`:`Removed verified from @${u.handle}.`)}}
     ownerData=null;await loadOwner();loadWall(true);
   }catch(err){if(err.message!=='locked'){toast(err.message);renderOwner()}}});
 

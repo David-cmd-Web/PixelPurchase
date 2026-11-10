@@ -9,6 +9,10 @@
 //   approve   → charges the card (only for the spots you keep) and puts those spots live
 //   decline   → releases the card hold (never charged), frees the spots, deletes the pictures
 //   takedown  → removes a live spot that breaks the rules (no refund), frees it, deletes its picture
+//   delcomment→ deletes a comment (and any reports on it)
+//   dismiss   → clears a report ("keep it")
+//   ban       → blocks or unblocks an account: no likes, comments, follows, reports or purchases; comments hidden
+//   verify    → adds or removes the verified badge on a profile
 
 const PRICES = { 1: 149, 2: 500, 5: 2900, 10: 11000 }; // cents. Must match PRICES in index.html.
 
@@ -52,6 +56,15 @@ async function getOrder(env, orderId) {
   return Array.isArray(rows) && rows[0] ? rows[0] : null;
 }
 
+async function profiles(env, ids) {
+  const out = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    const ps = await readJson(await sb(env, `/rest/v1/profiles?id=in.(${ids.slice(i, i + 100).join(',')})&select=id,handle,name,verified`));
+    if (Array.isArray(ps)) out.push(...ps);
+  }
+  return out;
+}
+
 async function list(env) {
   const pending = await readJson(await sb(env,
     '/rest/v1/orders?status=eq.pending&order=paid_at.asc&limit=200' +
@@ -62,20 +75,35 @@ async function list(env) {
   const approved = await readJson(await sb(env, '/rest/v1/orders?status=eq.approved&select=amount_cents'));
   const live = await readJson(await sb(env, '/rest/v1/spots?status=eq.live&select=size'));
 
-  const orders = Array.isArray(pending) ? pending : [];
-  const done = Array.isArray(recent) ? recent : [];
+  const arr = x => (Array.isArray(x) ? x : []);
+  const orders = arr(pending);
+  const done = arr(recent);
+  const reports = arr(await readJson(await sb(env,
+    '/rest/v1/reports?order=created_at.desc&limit=100&select=id,reason,created_at,reporter,spot_id,comment_id' +
+    ',spot:spots(id,x,y,size,kind,color,image_path,caption,owner_id,status),comment:comments(id,body,user_id,spot_id,created_at)')));
+  const comments = arr(await readJson(await sb(env,
+    '/rest/v1/comments?order=created_at.desc&limit=100&select=id,spot_id,user_id,body,created_at,spot:spots(id,x,y,size,caption)')));
+  const banned = arr(await readJson(await sb(env, '/rest/v1/account_private?banned=is.true&select=user_id'))).map(r => r.user_id);
   const buyerIds = [...new Set([...orders, ...done].map(o => o.buyer_id).filter(isUuid))];
+  const otherIds = [...new Set([
+    ...comments.map(c => c.user_id), ...banned,
+    ...reports.map(r => (r.comment && r.comment.user_id) || (r.spot && r.spot.owner_id)),
+  ].filter(id => isUuid(id) && !buyerIds.includes(id)))];
   const people = {};
   if (buyerIds.length) {
-    const ps = await readJson(await sb(env, `/rest/v1/profiles?id=in.(${buyerIds.join(',')})&select=id,handle,name`));
-    (Array.isArray(ps) ? ps : []).forEach(p => { people[p.id] = { handle: p.handle, name: p.name }; });
+    (await profiles(env, buyerIds)).forEach(p => { people[p.id] = { handle: p.handle, name: p.name, verified: p.verified }; });
     // Buyer emails (private; only you see them here).
     await Promise.all(buyerIds.slice(0, 50).map(async id => {
       const u = await readJson(await sb(env, `/auth/v1/admin/users/${id}`));
       if (u && u.email) people[id] = { ...(people[id] || {}), email: u.email };
     }));
   }
+  if (otherIds.length)
+    (await profiles(env, otherIds)).forEach(p => { people[p.id] = { handle: p.handle, name: p.name, verified: p.verified }; });
   return {
+    reports,
+    comments,
+    banned,
     pending: orders.map(o => ({ ...o, spots: (o.spots || []).filter(s => s.status === 'pending') })),
     recent: done,
     people,
@@ -156,8 +184,42 @@ async function takedown(env, spotId) {
   await sb(env, `/rest/v1/spots?id=eq.${spotId}`, {
     method: 'PATCH', headers: { 'content-type': 'application/json', prefer: 'return=minimal' }, body: JSON.stringify({ status: 'removed', image_path: null, kind: 'color', color: '#000000', caption: null }),
   });
+  await sb(env, `/rest/v1/reports?spot_id=eq.${spotId}`, { method: 'DELETE', headers: { prefer: 'return=minimal' } });
   await deletePictures(env, [s.image_path]);
   return json({ ok: true });
+}
+
+async function delComment(env, id) {
+  const r = await sb(env, `/rest/v1/comments?id=eq.${id}`, { method: 'DELETE', headers: { prefer: 'return=representation' } });
+  const rows = await readJson(r);
+  if (!r.ok) return json({ error: 'Couldn’t delete that comment. Try again.' }, 502);
+  if (!Array.isArray(rows) || !rows.length) return json({ error: 'That comment is already gone.' }, 404);
+  return json({ ok: true });
+}
+
+async function dismiss(env, id) {
+  const r = await sb(env, `/rest/v1/reports?id=eq.${id}`, { method: 'DELETE', headers: { prefer: 'return=minimal' } });
+  if (!r.ok) return json({ error: 'Couldn’t clear that report. Try again.' }, 502);
+  return json({ ok: true });
+}
+
+async function ban(env, me, userId, on) {
+  if (!isUuid(userId)) return json({ error: 'Bad request.' }, 400);
+  if (userId === me) return json({ error: 'You can’t block yourself.' }, 400);
+  const r = await sb(env, '/rest/v1/rpc/pp_set_banned', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ p_user: userId, p_on: on === true }),
+  });
+  if (!r.ok) return json({ error: 'Couldn’t change that account. Try again.' }, 502);
+  return json({ ok: true, banned: on === true });
+}
+
+async function verify(env, userId, on) {
+  if (!isUuid(userId)) return json({ error: 'Bad request.' }, 400);
+  const r = await sb(env, `/rest/v1/profiles?id=eq.${userId}`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json', prefer: 'return=minimal' }, body: JSON.stringify({ verified: on === true }),
+  });
+  if (!r.ok) return json({ error: 'Couldn’t change that profile. Try again.' }, 502);
+  return json({ ok: true, verified: on === true });
 }
 
 export async function onRequestPost({ request, env }) {
@@ -169,12 +231,16 @@ export async function onRequestPost({ request, env }) {
     if (!(await isUnlockedOwner(env, user.id, body.token)))
       return json({ error: 'The owner panel is locked. Unlock it again.', code: 'locked' }, 403);
 
-    const id = Number(body.order ?? body.spot);
     if (body.action === 'list') return json(await list(env));
+    if (body.action === 'ban') return ban(env, user.id, body.user, body.on);
+    if (body.action === 'verify') return verify(env, body.user, body.on);
+    const id = Number(body.order ?? body.spot ?? body.comment ?? body.report);
     if (!Number.isInteger(id) || id <= 0) return json({ error: 'Bad request.' }, 400);
     if (body.action === 'approve') return approve(env, id, body.remove);
     if (body.action === 'decline') return decline(env, id);
     if (body.action === 'takedown') return takedown(env, id);
+    if (body.action === 'delcomment') return delComment(env, id);
+    if (body.action === 'dismiss') return dismiss(env, id);
     return json({ error: 'Unknown action.' }, 400);
   } catch (e) {
     return json({ error: 'Something went wrong. Try again.' }, 500);
